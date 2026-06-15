@@ -98,6 +98,15 @@ class ForestScriptVR extends xb.Script {
     this.cauldronPos = new THREE.Vector3(-0.35, this.floorY + 0.15, -0.65);
     this.bagPos = new THREE.Vector3(0.35, this.floorY + 0.11, -0.5);
 
+    // Sistema de Teletransporte
+    this.activeTeleportController = null;
+    this.teleportTargetPos = new THREE.Vector3();
+    this.teleportMarker = null;
+
+    // Herramientas de Raycasting personalizadas para máxima precisión de selección y teletransporte
+    this.raycaster = new THREE.Raycaster();
+    this.tempMatrix = new THREE.Matrix4();
+
     // Referencias de UI
     this.uiPanel = null;
     this.uiScoreText = null;
@@ -122,9 +131,10 @@ class ForestScriptVR extends xb.Script {
 
   init() {
     // Configuración obligatoria de VR puro: Forzar fondo opaco oscuro en la escena para anular AR passthrough
-    const spaceDark = new THREE.Color(0x070b0e);
+    const spaceDark = new THREE.Color(0x05080c);
     xb.core.scene.background = spaceDark;
     xb.core.renderer.setClearColor(spaceDark, 1.0);
+    xb.core.renderer.setClearAlpha(1.0);
 
     // Ajustar la cámara para que esté más al nivel del suelo (Inmersión VR de césped)
     xb.core.user.height = 0.35;
@@ -138,7 +148,7 @@ class ForestScriptVR extends xb.Script {
     this.add(sunLight);
 
     // Configuración de Niebla
-    this.sceneFog = new THREE.FogExp2(0x070b0e, 0.12);
+    this.sceneFog = new THREE.FogExp2(0x05080c, 0.12);
     xb.core.scene.fog = this.sceneFog;
 
     // Crear cielo estrellado VR de 360 grados (No AR)
@@ -155,11 +165,14 @@ class ForestScriptVR extends xb.Script {
     // Spawn de las plantas del piso y la CAJA DE CARTÓN
     this.spawnPlants();
 
-    // Crear interfaces de usuario espaciales curvas ajustadas a la altura baja
+    // Crear interfaces de usuario espaciales curvas con estilo medieval
     this.createSpatialUI();
 
     // Crear las manos virtuales visibles y vincularlas directamente a los mandos XR de Three.js
     this.createVirtualHands();
+
+    // Crear el marcador de teletransporte
+    this.createTeleportMarker();
 
     // Escuchar eventos físicos de agarre
     this.onSelectStart = this.onSelectStart.bind(this);
@@ -186,8 +199,8 @@ class ForestScriptVR extends xb.Script {
       varying vec3 vWorldPosition;
       void main() {
         float h = normalize(vWorldPosition).y;
-        vec3 skyColor = vec3(0.03, 0.04, 0.12); // Azul noche profundo
-        vec3 horizonColor = vec3(0.12, 0.05, 0.2); // Violeta místico
+        vec3 skyColor = vec3(0.02, 0.03, 0.08); // Azul noche profundo
+        vec3 horizonColor = vec3(0.10, 0.04, 0.15); // Violeta medieval
         vec3 finalColor = mix(horizonColor, skyColor, max(h, 0.0));
         gl_FragColor = vec4(finalColor, 1.0);
       }
@@ -231,43 +244,70 @@ class ForestScriptVR extends xb.Script {
   }
 
   /**
-   * Genera las manos 3D virtuales visibles acoplándolas directamente al sistema de rastreo de Three.js.
+   * Genera las manos virtuales anatómicas visibles que flexionan sus dedos.
    */
   createVirtualHands() {
-    const handGeo = new THREE.BoxGeometry(0.04, 0.03, 0.07);
     const handMat = new THREE.MeshStandardMaterial({
-      color: 0x1d331e, // Verde explorador forestal
-      roughness: 0.8,
-      metalness: 0.1
+      color: 0x3d2514, // Cuero medieval oscuro para guantes rústicos
+      roughness: 0.9,
+      metalness: 0.15
     });
 
-    const cuffGeo = new THREE.CylinderGeometry(0.024, 0.024, 0.04, 8);
-    const cuffMat = new THREE.MeshStandardMaterial({ color: 0x2d4d2f, roughness: 0.9 });
+    const cuffMat = new THREE.MeshStandardMaterial({ color: 0x5c3c21, roughness: 0.85 });
 
     const xr = xb.core.renderer.xr;
 
     ['left', 'right'].forEach((handName, idx) => {
       const handGroup = new THREE.Group();
       
-      // Palma
-      const palm = new THREE.Mesh(handGeo, handMat);
-      palm.position.set(0, 0, -0.01);
+      // Palma anatómica
+      const palmGeo = new THREE.BoxGeometry(0.045, 0.015, 0.055);
+      const palm = new THREE.Mesh(palmGeo, handMat);
+      palm.position.set(0, 0, -0.015);
       handGroup.add(palm);
 
-      // Puño
+      // Muñequera de cuero
+      const cuffGeo = new THREE.CylinderGeometry(0.026, 0.026, 0.04, 8);
       const cuff = new THREE.Mesh(cuffGeo, cuffMat);
       cuff.rotation.x = Math.PI / 2;
-      cuff.position.set(0, 0, 0.03);
+      cuff.position.set(0, 0, 0.025);
       handGroup.add(cuff);
 
-      // Dedo indicador
-      const fingerGeo = new THREE.CylinderGeometry(0.006, 0.006, 0.025, 6);
-      const finger = new THREE.Mesh(fingerGeo, handMat);
-      finger.rotation.x = Math.PI / 2;
-      finger.position.set(0, 0, -0.05);
-      handGroup.add(finger);
+      // Modelar los 5 dedos de manera realista y rústica
+      const fingers = [];
+      const fingerPositions = [-0.016, -0.005, 0.006, 0.016];
+      const fingerLengths = [0.020, 0.022, 0.019, 0.015];
 
-      // Brillo en la punta
+      // Dedos: índice, medio, anular, meñique
+      fingerPositions.forEach((xPos, fIdx) => {
+        const fLen = fingerLengths[fIdx];
+        const fGroup = new THREE.Group();
+        fGroup.position.set(xPos, 0, -0.04);
+        
+        const segment = new THREE.Mesh(new THREE.BoxGeometry(0.008, 0.008, fLen), handMat);
+        segment.position.set(0, 0, -fLen / 2);
+        fGroup.add(segment);
+        
+        handGroup.add(fGroup);
+        fingers.push(fGroup);
+      });
+
+      // Dedo pulgar
+      const thumbGroup = new THREE.Group();
+      thumbGroup.position.set(idx === 0 ? -0.023 : 0.023, 0, -0.025);
+      thumbGroup.rotation.y = idx === 0 ? -0.6 : 0.6;
+      
+      const thumbSegment = new THREE.Mesh(new THREE.BoxGeometry(0.008, 0.008, 0.018), handMat);
+      thumbSegment.position.set(0, 0, -0.009);
+      thumbGroup.add(thumbSegment);
+      
+      handGroup.add(thumbGroup);
+      fingers.push(thumbGroup);
+
+      // Guardamos referencias para animar flexión de dedos al agarrar
+      handGroup.userData = { fingers: fingers, isLeft: idx === 0 };
+
+      // Brillo místico guía
       const pointerGlow = new THREE.PointLight(0xa7f3d0, 0.3, 0.2);
       pointerGlow.position.set(0, 0, -0.06);
       handGroup.add(pointerGlow);
@@ -275,11 +315,27 @@ class ForestScriptVR extends xb.Script {
       this.handVisuals[handName] = handGroup;
 
       // ACOPLAMIENTO CRÍTICO: Añadir el grupo visual directamente como hijo del control XR de Three.js.
-      // Esto hace que herede posición, rotación y visibilidad de forma automática y nativa.
       const controller = xr.getController(idx);
-      this.add(controller); // Añadir controlador a la escena
-      controller.add(handGroup); // Añadir guante al controlador
+      this.add(controller);
+      controller.add(handGroup);
     });
+  }
+
+  /**
+   * Crea el marcador visual para el sistema de teletransporte en el piso.
+   */
+  createTeleportMarker() {
+    const ringGeo = new THREE.RingGeometry(0.2, 0.24, 32);
+    ringGeo.rotation.x = -Math.PI / 2;
+    const ringMat = new THREE.MeshBasicMaterial({
+      color: 0x8b5cf6, // Violeta místico
+      side: THREE.DoubleSide,
+      transparent: true,
+      opacity: 0.0 // Invisible por defecto
+    });
+    this.teleportMarker = new THREE.Mesh(ringGeo, ringMat);
+    this.teleportMarker.position.y = this.floorY + 0.01;
+    this.add(this.teleportMarker);
   }
 
   /**
@@ -288,19 +344,18 @@ class ForestScriptVR extends xb.Script {
   createForestFloor() {
     const groundGeo = new THREE.CircleGeometry(15, 32);
     const groundMat = new THREE.MeshStandardMaterial({
-      color: 0x0b170c,
+      color: 0x071108, // Tierra mística medieval oscura
       roughness: 0.95,
       metalness: 0.05,
     });
-    const ground = new THREE.Mesh(groundGeo, groundMat);
-    ground.rotation.x = -Math.PI / 2;
-    // Elevamos el piso virtual un poco para facilitar el alcance al agacharse
-    ground.position.y = this.floorY;
-    this.add(ground);
+    this.groundMesh = new THREE.Mesh(groundGeo, groundMat);
+    this.groundMesh.rotation.x = -Math.PI / 2;
+    this.groundMesh.position.y = this.floorY;
+    this.add(this.groundMesh);
 
     // Rocas místicas
     const stoneGeo = new THREE.DodecahedronGeometry(0.12, 1);
-    const stoneMat = new THREE.MeshStandardMaterial({ color: 0x272d27, roughness: 0.9 });
+    const stoneMat = new THREE.MeshStandardMaterial({ color: 0x1f221f, roughness: 0.9 });
     for (let i = 0; i < 22; i++) {
       const stone = new THREE.Mesh(stoneGeo, stoneMat);
       const angle = Math.random() * Math.PI * 2;
@@ -317,9 +372,9 @@ class ForestScriptVR extends xb.Script {
    */
   createBackgroundForest() {
     const trunkGeo = new THREE.CylinderGeometry(0.14, 0.22, 2.6, 8);
-    const trunkMat = new THREE.MeshStandardMaterial({ color: 0x22150d, roughness: 0.9 });
+    const trunkMat = new THREE.MeshStandardMaterial({ color: 0x180f08, roughness: 0.9 });
     const leavesGeo = new THREE.DodecahedronGeometry(0.7, 1);
-    const leavesColors = [0x0e240c, 0x183315, 0x091c08];
+    const leavesColors = [0x081507, 0x10250d, 0x051204];
 
     const numTrees = 26;
     for (let i = 0; i < numTrees; i++) {
@@ -373,7 +428,7 @@ class ForestScriptVR extends xb.Script {
     const cauldronGroup = new THREE.Group();
     cauldronGroup.position.copy(this.cauldronPos);
 
-    const ironMat = new THREE.MeshStandardMaterial({ color: 0x141517, roughness: 0.75, metalness: 0.85 });
+    const ironMat = new THREE.MeshStandardMaterial({ color: 0x0f1012, roughness: 0.75, metalness: 0.85 });
     const bowlGeo = new THREE.CylinderGeometry(0.2, 0.24, 0.18, 16);
     const bowl = new THREE.Mesh(bowlGeo, ironMat);
     bowl.position.y = 0.09;
@@ -423,10 +478,10 @@ class ForestScriptVR extends xb.Script {
     const bagGroup = new THREE.Group();
     bagGroup.position.copy(this.bagPos);
 
-    const leatherMat = new THREE.MeshStandardMaterial({ color: 0x482b17, roughness: 0.9 });
-    const goldMat = new THREE.MeshStandardMaterial({ color: 0xffd700, metalness: 0.9, roughness: 0.15 });
+    const leatherMat = new THREE.MeshStandardMaterial({ color: 0x3d1d11, roughness: 0.9 });
+    const goldMat = new THREE.MeshStandardMaterial({ color: 0xbfa15f, metalness: 0.8, roughness: 0.25 });
 
-    // Bolsa de Cuero
+    // Bolsa de Cuero rústica medieval
     const bagBaseGeo = new THREE.BoxGeometry(0.18, 0.22, 0.13);
     const bagMesh = new THREE.Mesh(bagBaseGeo, leatherMat);
     bagMesh.position.y = 0.11;
@@ -462,7 +517,7 @@ class ForestScriptVR extends xb.Script {
       { name: 'Flor Estelar', color: 0xffd700, type: 'star' },
       { name: 'Orquídea de Maná', color: 0x2563eb, type: 'mana' },
       { name: 'Helecho Radiante', color: 0x10b981, type: 'fern' },
-      // ¡LA CAJA DE CARTÓN interactiva! (según tu imagen, con un tamaño mayor y colisionador generoso)
+      // ¡LA CAJA DE CARTÓN interactiva! (según tu imagen, con un tamaño mayor, colisionador generoso, no rota sola)
       { name: 'Caja de Cartón', color: 0xc68a4c, type: 'carton_box' }
     ];
 
@@ -485,18 +540,18 @@ class ForestScriptVR extends xb.Script {
       let interactableRadius = 0.18;
       
       if (type.type === 'carton_box') {
-        // --- MODELAR LA CAJA DE CARTÓN DE TU IMAGEN ---
+        // --- MODELAR LA CAJA DE CARTÓN DE TU IMAGEN (Mayor tamaño: 0.28m, no rotará sola) ---
         const boxGroup = new THREE.Group();
 
-        // 1. Cuerpo principal rústico marrón (Escala mayor: 0.24 metros cúbicos)
-        const boxGeo = new THREE.BoxGeometry(0.24, 0.24, 0.24);
+        // 1. Cuerpo principal rústico marrón
+        const boxGeo = new THREE.BoxGeometry(0.28, 0.28, 0.28);
         const boxMat = new THREE.MeshStandardMaterial({
           color: 0xc69666, // Marrón cartón rústico
           roughness: 0.95,
           metalness: 0.05
         });
         const boxBody = new THREE.Mesh(boxGeo, boxMat);
-        boxBody.position.y = 0.12;
+        boxBody.position.y = 0.14;
         boxGroup.add(boxBody);
 
         // 2. Cinta de embalaje marrón oscuro superior (solapa central)
@@ -506,30 +561,30 @@ class ForestScriptVR extends xb.Script {
         });
 
         // Cinta del medio arriba
-        const tapeTop = new THREE.Mesh(new THREE.BoxGeometry(0.045, 0.002, 0.242), tapeMat);
-        tapeTop.position.set(0, 0.241, 0);
+        const tapeTop = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.002, 0.282), tapeMat);
+        tapeTop.position.set(0, 0.281, 0);
         boxGroup.add(tapeTop);
 
         // Cinta que cae por los costados delanteros/traseros
-        const tapeFront = new THREE.Mesh(new THREE.BoxGeometry(0.045, 0.08, 0.002), tapeMat);
-        tapeFront.position.set(0, 0.20, 0.121);
+        const tapeFront = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.09, 0.002), tapeMat);
+        tapeFront.position.set(0, 0.235, 0.141);
         boxGroup.add(tapeFront);
 
-        const tapeBack = new THREE.Mesh(new THREE.BoxGeometry(0.045, 0.08, 0.002), tapeMat);
-        tapeBack.position.set(0, 0.20, -0.121);
+        const tapeBack = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.09, 0.002), tapeMat);
+        tapeBack.position.set(0, 0.235, -0.141);
         boxGroup.add(tapeBack);
 
         // Cinta que cae por los costados laterales inferiores (según imagen)
-        const tapeLeft = new THREE.Mesh(new THREE.BoxGeometry(0.002, 0.05, 0.045), tapeMat);
-        tapeLeft.position.set(-0.121, 0.04, 0);
+        const tapeLeft = new THREE.Mesh(new THREE.BoxGeometry(0.002, 0.06, 0.05), tapeMat);
+        tapeLeft.position.set(-0.141, 0.045, 0);
         boxGroup.add(tapeLeft);
 
-        const tapeRight = new THREE.Mesh(new THREE.BoxGeometry(0.002, 0.05, 0.045), tapeMat);
-        tapeRight.position.set(0.121, 0.04, 0);
+        const tapeRight = new THREE.Mesh(new THREE.BoxGeometry(0.002, 0.06, 0.05), tapeMat);
+        tapeRight.position.set(0.141, 0.045, 0);
         boxGroup.add(tapeRight);
 
         visualGroup.add(boxGroup);
-        interactableRadius = 0.25; // Colisionador mayor para la caja de cartón
+        interactableRadius = 0.32; // Colisionador mayor para la caja de cartón
       } else {
         // Construir flora procedural estándar
         this.buildPlantGeometry(visualGroup, type);
@@ -638,14 +693,14 @@ class ForestScriptVR extends xb.Script {
   }
 
   /**
-   * Crea paneles de interfaz mística ajustados al nivel del piso del usuario.
+   * Crea paneles de interfaz mística ajustados al nivel del piso del usuario, ahora con estilo MEDIEVAL (papiro y bordes oscuros).
    */
   createSpatialUI() {
-    // --- PANEL IZQUIERDO: Inventario y Control ---
+    // --- PANEL IZQUIERDO: Inventario y Control Medieval ---
     this.uiPanel = new xb.SpatialPanel({
       width: 0.75,
       height: 0.65,
-      backgroundColor: '#0d1c0ecc', 
+      backgroundColor: '#edd6c4f5', // Tono papiro claro cálido medieval
     });
     // Ajustar posición más baja enfrente del piso elevado
     this.uiPanel.position.set(-0.45, this.floorY + 0.35, -0.75);
@@ -655,29 +710,29 @@ class ForestScriptVR extends xb.Script {
     const leftGrid = this.uiPanel.addGrid();
 
     leftGrid.addRow({ weight: 0.25 }).addText({
-      text: 'Explorador VR Alquimista',
-      fontSize: 0.048,
-      fontColor: '#a7f3d0'
+      text: '✥ Pergamino de Botánica ✥',
+      fontSize: 0.045,
+      fontColor: '#3d1d11' // Marrón quemado medieval
     });
 
     this.uiScoreText = leftGrid.addRow({ weight: 0.2 }).addText({
-      text: `Muestras: 0 / ${this.totalPlants}`,
-      fontSize: 0.052,
-      fontColor: '#ffffff'
+      text: `Muestras Guardadas: 0 / ${this.totalPlants}`,
+      fontSize: 0.046,
+      fontColor: '#4a2617'
     });
 
     this.uiSubtitle = leftGrid.addRow({ weight: 0.25 }).addText({
-      text: '¡Agarra las plantas del suelo o la caja de cartón con tus manos y examínalas rotando tu muñeca!',
-      fontSize: 0.024,
-      fontColor: '#94a3b8'
+      text: 'Recoge plantas del suelo con tus manos de cuero. Usa el gatillo apuntando al piso para teletransportarte por el claro místico.',
+      fontSize: 0.023,
+      fontColor: '#5c3a21'
     });
 
     const resetRow = leftGrid.addRow({ weight: 0.3 });
     resetRow.addCol({ weight: 0.1 });
     this.uiResetBtn = resetRow.addCol({ weight: 0.8 }).addTextButton({
       text: 'Reiniciar Bosque',
-      fontColor: '#051407',
-      backgroundColor: '#10b981',
+      fontColor: '#f7ebd3', // Oro pálido
+      backgroundColor: '#5c2c14', // Marrón madera rústico
       fontSize: 0.12,
     });
     resetRow.addCol({ weight: 0.1 });
@@ -689,11 +744,11 @@ class ForestScriptVR extends xb.Script {
     this.uiPanel.updateLayouts();
 
 
-    // --- PANEL DERECHO: El Altar de Alquimia de Gemini ---
+    // --- PANEL DERECHO: El Altar de Alquimia de Gemini Medieval ---
     this.alchemyPanel = new xb.SpatialPanel({
       width: 0.9,
       height: 0.65,
-      backgroundColor: '#15141acc', 
+      backgroundColor: '#edd6c4f5', // Tono papiro
     });
     this.alchemyPanel.position.set(0.45, this.floorY + 0.35, -0.75);
     this.alchemyPanel.rotation.y = -0.4;
@@ -702,29 +757,29 @@ class ForestScriptVR extends xb.Script {
     const rightGrid = this.alchemyPanel.addGrid();
 
     rightGrid.addRow({ weight: 0.2 }).addText({
-      text: 'Altar Alquímico de Gemini',
-      fontSize: 0.046,
-      fontColor: '#c084fc'
+      text: '✥ Altar de Alquimia de Gemini ✥',
+      fontSize: 0.044,
+      fontColor: '#3d1d11'
     });
 
     this.alchemyIngredientsText = rightGrid.addRow({ weight: 0.15 }).addText({
-      text: 'En la Bolsa: Ninguno',
+      text: 'Bolsa de Muestras: Ninguna',
       fontSize: 0.035,
-      fontColor: '#e9d5ff'
+      fontColor: '#5c3c21'
     });
 
     this.alchemyResultText = rightGrid.addRow({ weight: 0.45 }).addText({
-      text: 'Examina objetos con tus manos o arrástralos hacia la bolsa/caldero. Luego presiona el botón para consultar con el Espíritu de Gemini.',
+      text: 'Coloca ingredientes en la bolsa de cuero o viértelos en el caldero, luego pulsa para invocar la destilación dinámica con la API de Gemini.',
       fontSize: 0.026,
-      fontColor: '#94a3b8'
+      fontColor: '#5c3a21'
     });
 
     const actionRow = rightGrid.addRow({ weight: 0.2 });
     actionRow.addCol({ weight: 0.15 });
     this.alchemyBtn = actionRow.addCol({ weight: 0.7 }).addTextButton({
-      text: '✨ Destilar Poción',
-      fontColor: '#ffffff',
-      backgroundColor: '#8b5cf6',
+      text: 'Destilar Poción con IA',
+      fontColor: '#f7ebd3',
+      backgroundColor: '#7a2214', // Vino medieval místico
       fontSize: 0.12,
     });
     actionRow.addCol({ weight: 0.15 });
@@ -746,19 +801,20 @@ class ForestScriptVR extends xb.Script {
   }
 
   /**
-   * Agarrar planta con la mano o control. 
-   * Traslado dinámico al árbol de nodos del controlador para rotaciones perfectas en la muñeca.
+   * Evento que se dispara al presionar el gatillo o pellizcar (Select Start).
+   * Gestiona tanto el agarre perfecto con dedos articulados como el apuntado para teletransporte.
    */
   onSelectStart(event) {
     const controller = event.target;
-    
+    const hand = this.detectHand(controller);
+
+    // 1. Intentar interactuar y agarrar un objeto del piso
+    let pickedAnything = false;
     for (const plant of this.plants) {
       if (plant.collected || plant.isBeingHeld) continue;
 
       const intersection = xb.core.user.select(plant.triggerMesh, controller);
       if (intersection) {
-        const hand = this.detectHand(controller);
-        
         plant.isBeingHeld = true;
         plant.holdingHand = hand;
         plant.controllerRef = controller;
@@ -766,26 +822,74 @@ class ForestScriptVR extends xb.Script {
         // Ocultar temporalmente el puntero láser de selección para inmersión limpia de mano
         if (controller.children[0]) controller.children[0].visible = false;
 
-        // ACOPLAMIENTO DE NODO: Hacer al objeto hijo del controlador para que se mueva y rote exactamente con él
+        // ACOPLAMIENTO DE NODO: Hacer al objeto hijo del controlador para que rote exactamente con la muñeca
         controller.add(plant.group);
         
-        // Ajustar posición local del objeto frente al controlador para que se vea perfectamente en la mano
-        plant.group.position.set(0, 0, -0.08);
+        // Ajustar posición local del objeto frente al guante para que se vea perfectamente en la palma
+        plant.group.position.set(0, 0, -0.06);
         plant.group.rotation.set(0, 0, 0);
 
-        // Cancelar escala autónoma de animación
+        // Cancelar animación autónoma de flotación en el piso
         plant.visuals.position.y = 0;
+
+        // Animación de los Dedos: Cerrar dedos de la mano para simular un "Grip" rústico
+        const hVis = this.handVisuals[hand];
+        if (hVis && hVis.userData && hVis.userData.fingers) {
+          hVis.userData.fingers.forEach(finger => {
+            // Flexionar dedos rotándolos hacia adentro
+            finger.rotation.x = -0.7;
+          });
+        }
+
+        pickedAnything = true;
         break; 
+      }
+    }
+
+    // 2. Si no interactúa con ningún objeto ni con la interfaz, activar la lógica de Teletransporte
+    if (!pickedAnything) {
+      // Usar raycasting místico contra el suelo
+      this.tempMatrix.identity().extractRotation(controller.matrixWorld);
+      this.raycaster.ray.origin.setFromMatrixPosition(controller.matrixWorld);
+      this.raycaster.ray.direction.set(0, 0, -1).applyMatrix4(this.tempMatrix);
+
+      const intersects = this.raycaster.intersectObject(this.groundMesh);
+      if (intersects.length > 0) {
+        this.activeTeleportController = controller;
+        this.teleportTargetPos.copy(intersects[0].point);
+        
+        // Posicionar y encender el marcador de teletransporte
+        this.teleportMarker.position.copy(this.teleportTargetPos);
+        this.teleportMarker.position.y = this.floorY + 0.01;
+        this.teleportMarker.material.opacity = 0.8;
       }
     }
   }
 
   /**
-   * Soltar el objeto místico y evaluar dónde cae físicamente en el claro de VR.
+   * Evento que se dispara al soltar el gatillo (Select End).
+   * Ejecuta el teletransporte o deposita el objeto liberado.
    */
   onSelectEnd(event) {
     const controller = event.target;
+    const hand = this.detectHand(controller);
 
+    // 1. Evaluar si el controlador estaba cargando una trayectoria de teletransporte
+    if (this.activeTeleportController === controller) {
+      // Teletransportar al explorador a la posición exacta en el claro del bosque
+      if (typeof xb.core.user.setPosition === 'function') {
+        xb.core.user.setPosition(this.teleportTargetPos.x, xb.core.user.height, this.teleportTargetPos.z);
+      } else {
+        xb.core.user.position.set(this.teleportTargetPos.x, xb.core.user.height, this.teleportTargetPos.z);
+      }
+
+      // Ocultar el marcador
+      this.teleportMarker.material.opacity = 0.0;
+      this.activeTeleportController = null;
+      return; // Saltar resto de lógica
+    }
+
+    // 2. Evaluar si soltó algún objeto
     for (const plant of this.plants) {
       if (plant.isBeingHeld && plant.controllerRef === controller) {
         plant.isBeingHeld = false;
@@ -794,11 +898,11 @@ class ForestScriptVR extends xb.Script {
 
         if (controller.children[0]) controller.children[0].visible = true;
 
-        // Obtener posición del mundo real del objeto antes de desacoplarlo
+        // Obtener posición del mundo real del objeto antes de desacoplarlo de la mano
         const currentPos = new THREE.Vector3();
         plant.group.getWorldPosition(currentPos);
 
-        // DESACOPLAR: Devolver el objeto a la escena principal para calcular colisiones físicas estáticas
+        // DESACOPLAR: Devolver el objeto a la escena principal
         this.add(plant.group);
         plant.group.position.copy(currentPos);
         plant.group.rotation.set(0, 0, 0);
@@ -811,8 +915,16 @@ class ForestScriptVR extends xb.Script {
         } else if (distToCauldron < 0.28) {
           this.depositInCauldron(plant, currentPos);
         } else {
-          // Si es liberado en otra zona del bosque, vuelve flotando majestuosamente a su lugar original
+          // Vuelve flotando majestuosamente a su lugar original
           this.returnPlantToSpawn(plant, currentPos);
+        }
+
+        // Animación de los Dedos: Abrir y relajar los dedos de la mano guante de nuevo
+        const hVis = this.handVisuals[hand];
+        if (hVis && hVis.userData && hVis.userData.fingers) {
+          hVis.userData.fingers.forEach(finger => {
+            finger.rotation.x = 0; // Dedos rectos de nuevo
+          });
         }
         break;
       }
@@ -820,7 +932,7 @@ class ForestScriptVR extends xb.Script {
   }
 
   /**
-   * Guarda el objeto en la Bolsa de Muestras.
+   * Guarda el objeto en la Bolsa de Muestras rústica.
    */
   depositInBag(plant, currentPos) {
     plant.collected = true;
@@ -837,20 +949,20 @@ class ForestScriptVR extends xb.Script {
       duration: 0.45
     });
 
-    this.uiScoreText.setText(`Muestras: ${this.baggedCount} / ${this.totalPlants}`);
+    this.uiScoreText.setText(`Muestras Guardadas: ${this.baggedCount} / ${this.totalPlants}`);
     this.alchemyIngredientsText.setText(`En la Bolsa: ${this.baggedIngredients.join(', ')}`);
     
     if (this.baggedCount === this.totalPlants) {
-      this.uiSubtitle.setText('¡Colección botánica y mística completada!');
+      this.uiSubtitle.setText('¡Colección de botánica medieval completada!');
     } else {
-      this.uiSubtitle.setText(`Bolsa: ¡Has guardado ${plant.type.name}!`);
+      this.uiSubtitle.setText(`Bolsa: ¡Has guardado un espécimen de ${plant.type.name}!`);
     }
 
     this.spawnSparks(this.bagPos.clone().add(new THREE.Vector3(0, 0.12, 0)), 0xe9d5ff);
   }
 
   /**
-   * Deposita el objeto directamente en el Caldero.
+   * Deposita el objeto directamente en el Caldero de Alquimia.
    */
   depositInCauldron(plant, currentPos) {
     plant.collected = true;
@@ -869,7 +981,7 @@ class ForestScriptVR extends xb.Script {
     this.targetLiquidColor.setHex(plant.type.color);
     this.spawnSparks(this.cauldronPos.clone().add(new THREE.Vector3(0, 0.18, 0)), plant.type.color);
     
-    this.uiSubtitle.setText(`Alquimia: ¡Vertido ${plant.type.name} en el caldero!`);
+    this.uiSubtitle.setText(`Alquimia: ¡Poured ${plant.type.name} en el caldero!`);
   }
 
   /**
@@ -921,24 +1033,24 @@ class ForestScriptVR extends xb.Script {
    */
   async runAlchemicalBrewing() {
     this.alchemyResultText.setText('✨ El Espíritu de Gemini está sintiendo la vibración física de los ingredientes...');
-    this.alchemyBtn.setFontColor('#94a3b8');
-    this.alchemyBtn.setBackgroundColor('#4c1d95');
+    this.alchemyBtn.setFontColor('#edd6c4');
+    this.alchemyBtn.setBackgroundColor('#3d1d11');
 
     let prompt = "";
     if (this.baggedIngredients.length === 0 && this.cauldronIngredients.length === 0) {
-      prompt = "No tengo nada en la bolsa ni en el caldero todavía. Háblame de los misterios cósmicos de este bosque nocturno estrellado y lánzame un corto acertijo.";
+      prompt = "No tengo nada en la bolsa ni en el caldero todavía. Háblame de los misterios cósmicos de este bosque nocturno estrellado y lánzame un corto acertijo medieval de botánica.";
     } else {
       const bolsaTexto = this.baggedIngredients.length > 0 ? this.baggedIngredients.join(', ') : 'Ninguno';
       const calderoTexto = this.cauldronIngredients.length > 0 ? this.cauldronIngredients.join(', ') : 'Ninguno';
       
-      prompt = `El explorador ha recolectado en su bolsa: ${bolsaTexto}, y ha depositado en su caldero físico de alquimia: ${calderoTexto}. Si contiene la "Caja de Cartón" (basada en una caja de embalaje con cinta), describe cómo el misterio y el empaque rústico de la caja de cartón añade propiedades protectoras de sorpresa al elixir. Formula una poción poética.`;
+      prompt = `El explorador ha recolectado en su bolsa: ${bolsaTexto}, y ha depositado en su caldero físico de alquimia: ${calderoTexto}. Si contiene la "Caja de Cartón" (basada en una caja de embalaje con cinta), describe cómo el misterio y el empaque rústico de la caja de cartón añade propiedades protectoras de sorpresa al elixir medieval. Formula una poción poética.`;
     }
 
     const respuestaMistica = await consultarEspirituGemini(prompt);
     this.alchemyResultText.setText(respuestaMistica);
 
-    this.alchemyBtn.setFontColor('#ffffff');
-    this.alchemyBtn.setBackgroundColor('#8b5cf6');
+    this.alchemyBtn.setFontColor('#f7ebd3');
+    this.alchemyBtn.setBackgroundColor('#7a2214');
   }
 
   /**
@@ -947,11 +1059,11 @@ class ForestScriptVR extends xb.Script {
   resetExperience() {
     this.spawnPlants();
 
-    this.uiScoreText.setText(`Muestras: 0 / ${this.totalPlants}`);
+    this.uiScoreText.setText(`Muestras Guardadas: 0 / ${this.totalPlants}`);
     this.uiSubtitle.setText('¡Toma las plantas o la caja del suelo con tus manos y examínalas rotando tu muñeca!');
     
     this.alchemyIngredientsText.setText('En la Bolsa: Ninguno');
-    this.alchemyResultText.setText('Examina objetos con tus manos o arrástralos hacia la bolsa/caldero. Luego presiona el botón para consultar con el Espíritu de Gemini.');
+    this.alchemyResultText.setText('Coloca ingredientes en la bolsa de cuero o viértelos en el caldero, luego pulsa para invocar la destilación dinámica con la API de Gemini.');
     this.targetLiquidColor.setHex(0x22c55e);
   }
 
@@ -974,12 +1086,25 @@ class ForestScriptVR extends xb.Script {
     ['left', 'right'].forEach(handName => {
       const visual = this.handVisuals[handName];
       if (visual && xr) {
-        // En VR inmersivo se muestran las manos siempre. En el simulador se muestran al usar las interacciones.
         visual.visible = xr.isPresenting || true;
       }
     });
 
-    // 3. Animación autónoma de flotación en las flores (Evitando rotación en la CAJA DE CARTÓN)
+    // 3. Actualizar la trayectoria dinámica del marcador de teletransporte si está activo
+    if (this.activeTeleportController) {
+      this.tempMatrix.identity().extractRotation(this.activeTeleportController.matrixWorld);
+      this.raycaster.ray.origin.setFromMatrixPosition(this.activeTeleportController.matrixWorld);
+      this.raycaster.ray.direction.set(0, 0, -1).applyMatrix4(this.tempMatrix);
+
+      const intersects = this.raycaster.intersectObject(this.groundMesh);
+      if (intersects.length > 0) {
+        this.teleportTargetPos.copy(intersects[0].point);
+        this.teleportMarker.position.copy(this.teleportTargetPos);
+        this.teleportMarker.position.y = this.floorY + 0.01;
+      }
+    }
+
+    // 4. Animación autónoma de flotación en las flores (Evitando rotación en la CAJA DE CARTÓN)
     this.plants.forEach(p => {
       if (!p.collected && !p.isBeingHeld) {
         if (p.type.type !== 'carton_box') {
@@ -996,7 +1121,7 @@ class ForestScriptVR extends xb.Script {
       }
     });
 
-    // 4. Suavizado en la transición de color del líquido del caldero
+    // 5. Suavizado en la transición de color del líquido del caldero
     if (!this.currentLiquidColor.equals(this.targetLiquidColor)) {
       this.currentLiquidColor.lerp(this.targetLiquidColor, 0.05);
       this.liquidMat.color.copy(this.currentLiquidColor);
@@ -1004,7 +1129,7 @@ class ForestScriptVR extends xb.Script {
       this.cauldronLight.color.copy(this.currentLiquidColor);
     }
 
-    // 5. Procesamiento de las animaciones activas (Regreso, Absorciones de bolsas y caldero)
+    // 6. Procesamiento de las animaciones activas (Regreso, Absorciones de bolsas y caldero)
     for (let i = this.activeAnimations.length - 1; i >= 0; i--) {
       const anim = this.activeAnimations[i];
       const elapsed = this.time - anim.startTime;
@@ -1035,7 +1160,7 @@ class ForestScriptVR extends xb.Script {
       }
     }
 
-    // 6. Motor de partículas físicas místicas
+    // 7. Motor de partículas físicas místicas
     for (let i = this.particles.length - 1; i >= 0; i--) {
       const p = this.particles[i];
       p.life -= dt * p.decay;
@@ -1059,6 +1184,14 @@ document.addEventListener('DOMContentLoaded', function () {
   const options = new xb.Options();
   options.enableUI();
   options.enableHands(); // Clave para activar manos y grips físicos en XR
+  
+  // Forzamos el modo de Realidad Virtual Completa inmersiva
+  if (typeof options.setSessionMode === 'function') {
+    options.setSessionMode('immersive-vr');
+  } else {
+    options.sessionMode = 'immersive-vr';
+  }
+
   options.setAppTitle('Forest Alchemist VR');
 
   xb.add(new ForestScriptVR());
