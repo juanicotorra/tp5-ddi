@@ -1,0 +1,1069 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <title>Explorador del Bosque Mágico VR | XR Blocks</title>
+
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, user-scalable=no"
+    />
+    <link type="text/css" rel="stylesheet" href="https://xrblocks.github.io/css/xr.css" />
+    <script>
+      window.litDisableBundleWarning = true;
+    </script>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.182.0/build/three.module.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.182.0/examples/jsm/",
+          "troika-three-text": "https://cdn.jsdelivr.net/gh/protectwise/troika@028b81cf308f0f22e5aa8e78196be56ec1997af5/packages/troika-three-text/src/index.js",
+          "troika-three-utils": "https://cdn.jsdelivr.net/gh/protectwise/troika@v0.52.4/packages/troika-three-utils/src/index.js",
+          "troika-worker-utils": "https://cdn.jsdelivr.net/gh/protectwise/troika@v0.52.4/packages/troika-worker-utils/src/index.js",
+          "bidi-js": "https://esm.sh/bidi-js@%5E1.0.2?target=es2022",
+          "webgl-sdf-generator": "https://esm.sh/webgl-sdf-generator@1.1.1/es2022/webgl-sdf-generator.mjs",
+          "lit": "https://cdn.jsdelivr.net/gh/lit/dist@3/core/lit-core.min.js",
+          "lit/": "https://esm.run/lit@3/",
+          "xrblocks": "https://cdn.jsdelivr.net/npm/xrblocks@0.16.0/build/xrblocks.js",
+          "xrblocks/addons/": "https://cdn.jsdelivr.net/npm/xrblocks@0.16.0/build/addons/"
+        }
+      }
+    </script>
+  </head>
+
+  <body>
+    <script type="module">
+import 'xrblocks/addons/simulator/SimulatorAddons.js';
+import * as THREE from 'three';
+import * as xb from 'xrblocks';
+
+// Configuración de la API de Gemini
+const apiKey = ""; // Se inyecta dinámicamente en tiempo de ejecución de manera segura
+
+/**
+ * Función auxiliar para realizar llamadas con reintentos y respaldo exponencial a Gemini
+ */
+async function consultarEspirituGemini(promptText) {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`;
+  
+  const systemInstruction = "Eres el Sabio Espíritu del Bosque Alquímico VR. El jugador puede recoger plantas del piso y cajas misteriosas de cartón con sus manos virtuales para inspeccionarlas o guardarlas. Habla siempre con tono místico, sabio y amigable. Si tiene objetos en la bolsa o el caldero, inventa una poción poética combinándolos (por ejemplo, si introduce la caja de cartón, menciona cómo el espíritu del embalaje o el cartón rústico añade propiedades protectoras o sorpresas al elixir). Si no tiene nada, lánzale un corto y poético acertijo sobre la naturaleza. Máximo 75 palabras.";
+
+  const payload = {
+    contents: [{ parts: [{ text: promptText }] }],
+    systemInstruction: { parts: [{ text: systemInstruction }] }
+  };
+
+  let delay = 1000;
+  for (let i = 0; i < 5; i++) {
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      if (!response.ok) throw new Error(`Error de red: ${response.status}`);
+      const data = await response.json();
+      return data.candidates?.[0]?.content?.parts?.[0]?.text || "La brisa nocturna silba pero no trae respuestas todavía...";
+    } catch (error) {
+      if (i === 4) {
+        return "El portal astral con Gemini se encuentra cerrado temporalmente por la niebla cósmica.";
+      }
+      await new Promise(resolve => setTimeout(resolve, delay));
+      delay *= 2;
+    }
+  }
+}
+
+/**
+ * Clase principal que gestiona la experiencia del bosque místico en VR,
+ * las manos del explorador, objetos agarrables (incluyendo la caja) y la API de Gemini.
+ */
+class ForestScriptVR extends xb.Script {
+  constructor() {
+    super();
+    this.plants = [];
+    this.baggedCount = 0;
+    this.totalPlants = 8;
+    this.particles = [];
+    this.treesToAnimate = [];
+    this.time = 0;
+
+    // Elementos del inventario
+    this.baggedIngredients = [];
+    this.cauldronIngredients = [];
+    this.activeAnimations = [];
+
+    // Elevamos sutilmente el nivel interactivo sobre el piso virtual (y = 0.22)
+    // para que el usuario pueda interactuar cómodamente inclinándose un poco
+    this.floorY = 0.22;
+    this.cauldronPos = new THREE.Vector3(-0.35, this.floorY + 0.15, -0.65);
+    this.bagPos = new THREE.Vector3(0.35, this.floorY + 0.11, -0.5);
+
+    // Referencias de UI
+    this.uiPanel = null;
+    this.uiScoreText = null;
+    this.uiSubtitle = null;
+    this.alchemyPanel = null;
+    this.alchemyIngredientsText = null;
+    this.alchemyResultText = null;
+    this.alchemyBtn = null;
+
+    // Componentes del Caldero e Iluminación
+    this.liquidMesh = null;
+    this.cauldronLight = null;
+    this.targetLiquidColor = new THREE.Color(0x22c55e);
+    this.currentLiquidColor = new THREE.Color(0x22c55e);
+
+    // Estructuras de manos virtuales visibles
+    this.handVisuals = {
+      left: null,
+      right: null
+    };
+  }
+
+  init() {
+    // Configuración obligatoria de VR puro: Forzar fondo opaco oscuro en la escena para anular AR passthrough
+    const spaceDark = new THREE.Color(0x070b0e);
+    xb.core.scene.background = spaceDark;
+    xb.core.renderer.setClearColor(spaceDark, 1.0);
+
+    // Ajustar la cámara para que esté más al nivel del suelo (Inmersión VR de césped)
+    xb.core.user.height = 0.35;
+
+    // Luz ambiental y solar
+    const hemisphereLight = new THREE.HemisphereLight(0x4a3b5c, 0x111e12, 1.8);
+    this.add(hemisphereLight);
+
+    const sunLight = new THREE.DirectionalLight(0xfff3e0, 1.2);
+    sunLight.position.set(5, 8, 2);
+    this.add(sunLight);
+
+    // Configuración de Niebla
+    this.sceneFog = new THREE.FogExp2(0x070b0e, 0.12);
+    xb.core.scene.fog = this.sceneFog;
+
+    // Crear cielo estrellado VR de 360 grados (No AR)
+    this.createVRSky();
+
+    // Crear piso y árboles
+    this.createForestFloor();
+    this.createBackgroundForest();
+    
+    // Crear recipientes
+    this.createCauldron();
+    this.createBag();
+
+    // Spawn de las plantas del piso y la CAJA DE CARTÓN
+    this.spawnPlants();
+
+    // Crear interfaces de usuario espaciales curvas ajustadas a la altura baja
+    this.createSpatialUI();
+
+    // Crear las manos virtuales visibles y vincularlas directamente a los mandos XR de Three.js
+    this.createVirtualHands();
+
+    // Escuchar eventos físicos de agarre
+    this.onSelectStart = this.onSelectStart.bind(this);
+    this.onSelectEnd = this.onSelectEnd.bind(this);
+  }
+
+  /**
+   * Crea un domo de cielo nocturno VR de 360 grados (Atmósfera de Fantasía).
+   */
+  createVRSky() {
+    const skyGeo = new THREE.SphereGeometry(25, 32, 15);
+    skyGeo.scale(-1, 1, 1);
+
+    const vertexShader = `
+      varying vec3 vWorldPosition;
+      void main() {
+        vec4 worldPosition = modelMatrix * vec4(position, 1.0);
+        vWorldPosition = worldPosition.xyz;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `;
+
+    const fragmentShader = `
+      varying vec3 vWorldPosition;
+      void main() {
+        float h = normalize(vWorldPosition).y;
+        vec3 skyColor = vec3(0.03, 0.04, 0.12); // Azul noche profundo
+        vec3 horizonColor = vec3(0.12, 0.05, 0.2); // Violeta místico
+        vec3 finalColor = mix(horizonColor, skyColor, max(h, 0.0));
+        gl_FragColor = vec4(finalColor, 1.0);
+      }
+    `;
+
+    const skyMat = new THREE.ShaderMaterial({
+      vertexShader: vertexShader,
+      fragmentShader: fragmentShader,
+      side: THREE.BackSide,
+      depthWrite: false
+    });
+
+    const sky = new THREE.Mesh(skyGeo, skyMat);
+    this.add(sky);
+
+    // Estrellas flotantes en el cielo de fondo
+    const starGeo = new THREE.BufferGeometry();
+    const starCount = 350;
+    const starPositions = new Float32Array(starCount * 3);
+
+    for (let i = 0; i < starCount; i++) {
+      const theta = Math.random() * Math.PI * 2;
+      const phi = Math.acos((Math.random() * 2) - 1);
+      const radius = 20 + Math.random() * 4;
+
+      starPositions[i * 3] = Math.sin(phi) * Math.cos(theta) * radius;
+      starPositions[i * 3 + 1] = Math.abs(Math.sin(phi) * Math.sin(theta) * radius);
+      starPositions[i * 3 + 2] = Math.cos(phi) * radius;
+    }
+
+    starGeo.setAttribute('position', new THREE.BufferAttribute(starPositions, 3));
+    const starMat = new THREE.PointsMaterial({
+      color: 0xffffff,
+      size: 0.06,
+      transparent: true,
+      opacity: 0.85
+    });
+
+    const starParticles = new THREE.Points(starGeo, starMat);
+    this.add(starParticles);
+  }
+
+  /**
+   * Genera las manos 3D virtuales visibles acoplándolas directamente al sistema de rastreo de Three.js.
+   */
+  createVirtualHands() {
+    const handGeo = new THREE.BoxGeometry(0.04, 0.03, 0.07);
+    const handMat = new THREE.MeshStandardMaterial({
+      color: 0x1d331e, // Verde explorador forestal
+      roughness: 0.8,
+      metalness: 0.1
+    });
+
+    const cuffGeo = new THREE.CylinderGeometry(0.024, 0.024, 0.04, 8);
+    const cuffMat = new THREE.MeshStandardMaterial({ color: 0x2d4d2f, roughness: 0.9 });
+
+    const xr = xb.core.renderer.xr;
+
+    ['left', 'right'].forEach((handName, idx) => {
+      const handGroup = new THREE.Group();
+      
+      // Palma
+      const palm = new THREE.Mesh(handGeo, handMat);
+      palm.position.set(0, 0, -0.01);
+      handGroup.add(palm);
+
+      // Puño
+      const cuff = new THREE.Mesh(cuffGeo, cuffMat);
+      cuff.rotation.x = Math.PI / 2;
+      cuff.position.set(0, 0, 0.03);
+      handGroup.add(cuff);
+
+      // Dedo indicador
+      const fingerGeo = new THREE.CylinderGeometry(0.006, 0.006, 0.025, 6);
+      const finger = new THREE.Mesh(fingerGeo, handMat);
+      finger.rotation.x = Math.PI / 2;
+      finger.position.set(0, 0, -0.05);
+      handGroup.add(finger);
+
+      // Brillo en la punta
+      const pointerGlow = new THREE.PointLight(0xa7f3d0, 0.3, 0.2);
+      pointerGlow.position.set(0, 0, -0.06);
+      handGroup.add(pointerGlow);
+
+      this.handVisuals[handName] = handGroup;
+
+      // ACOPLAMIENTO CRÍTICO: Añadir el grupo visual directamente como hijo del control XR de Three.js.
+      // Esto hace que herede posición, rotación y visibilidad de forma automática y nativa.
+      const controller = xr.getController(idx);
+      this.add(controller); // Añadir controlador a la escena
+      controller.add(handGroup); // Añadir guante al controlador
+    });
+  }
+
+  /**
+   * Crea el piso forestal elevado.
+   */
+  createForestFloor() {
+    const groundGeo = new THREE.CircleGeometry(15, 32);
+    const groundMat = new THREE.MeshStandardMaterial({
+      color: 0x0b170c,
+      roughness: 0.95,
+      metalness: 0.05,
+    });
+    const ground = new THREE.Mesh(groundGeo, groundMat);
+    ground.rotation.x = -Math.PI / 2;
+    // Elevamos el piso virtual un poco para facilitar el alcance al agacharse
+    ground.position.y = this.floorY;
+    this.add(ground);
+
+    // Rocas místicas
+    const stoneGeo = new THREE.DodecahedronGeometry(0.12, 1);
+    const stoneMat = new THREE.MeshStandardMaterial({ color: 0x272d27, roughness: 0.9 });
+    for (let i = 0; i < 22; i++) {
+      const stone = new THREE.Mesh(stoneGeo, stoneMat);
+      const angle = Math.random() * Math.PI * 2;
+      const radius = 1.0 + Math.random() * 5.0;
+      stone.position.set(Math.cos(angle) * radius, this.floorY + 0.02, Math.sin(angle) * radius);
+      stone.scale.set(0.6 + Math.random() * 0.8, 0.3 + Math.random() * 0.5, 0.6 + Math.random() * 0.8);
+      stone.rotation.set(Math.random(), Math.random(), Math.random());
+      this.add(stone);
+    }
+  }
+
+  /**
+   * Crea árboles de fantasía alrededor del claro.
+   */
+  createBackgroundForest() {
+    const trunkGeo = new THREE.CylinderGeometry(0.14, 0.22, 2.6, 8);
+    const trunkMat = new THREE.MeshStandardMaterial({ color: 0x22150d, roughness: 0.9 });
+    const leavesGeo = new THREE.DodecahedronGeometry(0.7, 1);
+    const leavesColors = [0x0e240c, 0x183315, 0x091c08];
+
+    const numTrees = 26;
+    for (let i = 0; i < numTrees; i++) {
+      const treeGroup = new THREE.Group();
+      
+      const trunk = new THREE.Mesh(trunkGeo, trunkMat);
+      trunk.position.y = 1.3;
+      treeGroup.add(trunk);
+
+      const colorLeaves = leavesColors[Math.floor(Math.random() * leavesColors.length)];
+      const leavesMat = new THREE.MeshStandardMaterial({ color: colorLeaves, roughness: 0.85 });
+      
+      const leafCount = 3 + Math.floor(Math.random() * 2);
+      const foliageGroup = new THREE.Group();
+      foliageGroup.position.y = 2.4;
+
+      for (let j = 0; j < leafCount; j++) {
+        const leaf = new THREE.Mesh(leavesGeo, leavesMat);
+        leaf.position.set(
+          (Math.random() - 0.5) * 0.3,
+          j * 0.45 - 0.1,
+          (Math.random() - 0.5) * 0.3
+        );
+        const s = 0.8 + Math.random() * 0.4;
+        leaf.scale.set(s, s + 0.2, s);
+        foliageGroup.add(leaf);
+      }
+      treeGroup.add(foliageGroup);
+
+      const angle = (i / numTrees) * Math.PI * 2 + (Math.random() - 0.5) * 0.15;
+      const radius = 2.4 + Math.random() * 2.8;
+      treeGroup.position.set(Math.cos(angle) * radius, this.floorY, Math.sin(angle) * radius);
+      
+      const treeScale = 0.8 + Math.random() * 0.4;
+      treeGroup.scale.set(treeScale, treeScale, treeScale);
+
+      this.add(treeGroup);
+      
+      this.treesToAnimate.push({
+        group: foliageGroup,
+        speed: 1.1 + Math.random() * 1.3,
+        offset: Math.random() * 12
+      });
+    }
+  }
+
+  /**
+   * Crea el caldero alquímico en el piso.
+   */
+  createCauldron() {
+    const cauldronGroup = new THREE.Group();
+    cauldronGroup.position.copy(this.cauldronPos);
+
+    const ironMat = new THREE.MeshStandardMaterial({ color: 0x141517, roughness: 0.75, metalness: 0.85 });
+    const bowlGeo = new THREE.CylinderGeometry(0.2, 0.24, 0.18, 16);
+    const bowl = new THREE.Mesh(bowlGeo, ironMat);
+    bowl.position.y = 0.09;
+    cauldronGroup.add(bowl);
+
+    const rimGeo = new THREE.TorusGeometry(0.18, 0.02, 8, 24);
+    const rim = new THREE.Mesh(rimGeo, ironMat);
+    rim.rotation.x = Math.PI / 2;
+    rim.position.y = 0.18;
+    cauldronGroup.add(rim);
+
+    // Patas
+    const legGeo = new THREE.BoxGeometry(0.03, 0.06, 0.03);
+    for (let i = 0; i < 3; i++) {
+      const leg = new THREE.Mesh(legGeo, ironMat);
+      const angle = (i / 3) * Math.PI * 2;
+      leg.position.set(Math.cos(angle) * 0.16, 0.03, Math.sin(angle) * 0.16);
+      leg.rotation.y = -angle;
+      leg.rotation.z = 0.15;
+      cauldronGroup.add(leg);
+    }
+
+    // Líquido hirviendo
+    const liquidGeo = new THREE.CylinderGeometry(0.17, 0.17, 0.01, 16);
+    this.liquidMat = new THREE.MeshStandardMaterial({
+      color: 0x22c55e,
+      emissive: 0x10532c,
+      roughness: 0.15,
+      metalness: 0.1
+    });
+    this.liquidMesh = new THREE.Mesh(liquidGeo, this.liquidMat);
+    this.liquidMesh.position.y = 0.17;
+    cauldronGroup.add(this.liquidMesh);
+
+    // Luz de brillo
+    this.cauldronLight = new THREE.PointLight(0x22c55e, 2.2, 1.0);
+    this.cauldronLight.position.set(0, 0.2, 0);
+    cauldronGroup.add(this.cauldronLight);
+
+    this.add(cauldronGroup);
+  }
+
+  /**
+   * Crea la Bolsa de Muestras mística de explorador.
+   */
+  createBag() {
+    const bagGroup = new THREE.Group();
+    bagGroup.position.copy(this.bagPos);
+
+    const leatherMat = new THREE.MeshStandardMaterial({ color: 0x482b17, roughness: 0.9 });
+    const goldMat = new THREE.MeshStandardMaterial({ color: 0xffd700, metalness: 0.9, roughness: 0.15 });
+
+    // Bolsa de Cuero
+    const bagBaseGeo = new THREE.BoxGeometry(0.18, 0.22, 0.13);
+    const bagMesh = new THREE.Mesh(bagBaseGeo, leatherMat);
+    bagMesh.position.y = 0.11;
+    bagMesh.rotation.y = -0.4;
+    bagGroup.add(bagMesh);
+
+    // Hebilla mística dorada
+    const buckleGeo = new THREE.BoxGeometry(0.03, 0.04, 0.02);
+    const buckle = new THREE.Mesh(buckleGeo, goldMat);
+    buckle.position.set(0.02, 0.10, 0.075);
+    buckle.rotation.y = -0.4;
+    bagGroup.add(buckle);
+
+    this.bagLight = new THREE.PointLight(0xe9d5ff, 1.0, 0.7);
+    this.bagLight.position.set(0, 0.22, 0);
+    bagGroup.add(this.bagLight);
+
+    this.add(bagGroup);
+  }
+
+  /**
+   * Genera las plantas recolectables en el piso y LA CAJA DE CARTÓN AGARRABLE (según imagen).
+   */
+  spawnPlants() {
+    this.plants.forEach(p => this.remove(p.group));
+    this.plants = [];
+    this.baggedIngredients = [];
+    this.cauldronIngredients = [];
+    this.baggedCount = 0;
+
+    const plantTypes = [
+      { name: 'Hongo de Fuego', color: 0xff3b3b, type: 'mushroom' },
+      { name: 'Flor Estelar', color: 0xffd700, type: 'star' },
+      { name: 'Orquídea de Maná', color: 0x2563eb, type: 'mana' },
+      { name: 'Helecho Radiante', color: 0x10b981, type: 'fern' },
+      // ¡LA CAJA DE CARTÓN interactiva! (según tu imagen, con un tamaño mayor y colisionador generoso)
+      { name: 'Caja de Cartón', color: 0xc68a4c, type: 'carton_box' }
+    ];
+
+    for (let i = 0; i < this.totalPlants; i++) {
+      const type = plantTypes[i % plantTypes.length];
+      
+      // Esparcir en un círculo cerrado accesible debido a que la altura está al nivel del piso
+      const angle = (i / this.totalPlants) * Math.PI * 2 + (Math.random() - 0.5) * 0.25;
+      const radius = 0.75 + Math.random() * 0.55; 
+      
+      const x = Math.cos(angle) * radius;
+      const z = Math.sin(angle) * radius;
+      // Posición base sobre el suelo elevado
+      const y = this.floorY + 0.01;
+
+      const plantGroup = new THREE.Group();
+      plantGroup.position.set(x, y, z);
+
+      const visualGroup = new THREE.Group();
+      let interactableRadius = 0.18;
+      
+      if (type.type === 'carton_box') {
+        // --- MODELAR LA CAJA DE CARTÓN DE TU IMAGEN ---
+        const boxGroup = new THREE.Group();
+
+        // 1. Cuerpo principal rústico marrón (Escala mayor: 0.24 metros cúbicos)
+        const boxGeo = new THREE.BoxGeometry(0.24, 0.24, 0.24);
+        const boxMat = new THREE.MeshStandardMaterial({
+          color: 0xc69666, // Marrón cartón rústico
+          roughness: 0.95,
+          metalness: 0.05
+        });
+        const boxBody = new THREE.Mesh(boxGeo, boxMat);
+        boxBody.position.y = 0.12;
+        boxGroup.add(boxBody);
+
+        // 2. Cinta de embalaje marrón oscuro superior (solapa central)
+        const tapeMat = new THREE.MeshStandardMaterial({
+          color: 0x8a5522, // Marrón oscuro cinta de embalar
+          roughness: 0.6
+        });
+
+        // Cinta del medio arriba
+        const tapeTop = new THREE.Mesh(new THREE.BoxGeometry(0.045, 0.002, 0.242), tapeMat);
+        tapeTop.position.set(0, 0.241, 0);
+        boxGroup.add(tapeTop);
+
+        // Cinta que cae por los costados delanteros/traseros
+        const tapeFront = new THREE.Mesh(new THREE.BoxGeometry(0.045, 0.08, 0.002), tapeMat);
+        tapeFront.position.set(0, 0.20, 0.121);
+        boxGroup.add(tapeFront);
+
+        const tapeBack = new THREE.Mesh(new THREE.BoxGeometry(0.045, 0.08, 0.002), tapeMat);
+        tapeBack.position.set(0, 0.20, -0.121);
+        boxGroup.add(tapeBack);
+
+        // Cinta que cae por los costados laterales inferiores (según imagen)
+        const tapeLeft = new THREE.Mesh(new THREE.BoxGeometry(0.002, 0.05, 0.045), tapeMat);
+        tapeLeft.position.set(-0.121, 0.04, 0);
+        boxGroup.add(tapeLeft);
+
+        const tapeRight = new THREE.Mesh(new THREE.BoxGeometry(0.002, 0.05, 0.045), tapeMat);
+        tapeRight.position.set(0.121, 0.04, 0);
+        boxGroup.add(tapeRight);
+
+        visualGroup.add(boxGroup);
+        interactableRadius = 0.25; // Colisionador mayor para la caja de cartón
+      } else {
+        // Construir flora procedural estándar
+        this.buildPlantGeometry(visualGroup, type);
+      }
+
+      plantGroup.add(visualGroup);
+
+      const glowLight = new THREE.PointLight(type.color, 0.8, 0.5);
+      glowLight.position.set(0, 0.15, 0);
+      plantGroup.add(glowLight);
+
+      // Colisionador generoso para manos o controles en VR
+      const triggerGeo = new THREE.SphereGeometry(interactableRadius, 8, 8);
+      const triggerMat = new THREE.MeshBasicMaterial({
+        color: type.color,
+        transparent: true,
+        opacity: 0, 
+        depthWrite: false
+      });
+      const triggerMesh = new THREE.Mesh(triggerGeo, triggerMat);
+      triggerMesh.position.set(0, 0.08, 0);
+      plantGroup.add(triggerMesh);
+
+      this.add(plantGroup);
+
+      this.plants.push({
+        group: plantGroup,
+        visuals: visualGroup,
+        light: glowLight,
+        triggerMesh: triggerMesh,
+        type: type,
+        collected: false,
+        isBeingHeld: false,
+        holdingHand: null,
+        controllerRef: null,
+        spawnPosition: new THREE.Vector3(x, y, z),
+        bobOffset: Math.random() * 100,
+        bobSpeed: 1.3 + Math.random() * 0.7,
+        spinSpeed: 0.2 + Math.random() * 0.4
+      });
+    }
+  }
+
+  /**
+   * Construye flora mágica procedural.
+   */
+  buildPlantGeometry(group, info) {
+    const stemMat = new THREE.MeshStandardMaterial({ color: 0x163a18, roughness: 0.8 });
+    const petalMat = new THREE.MeshStandardMaterial({ color: info.color, roughness: 0.5 });
+    const innerMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.4 });
+
+    if (info.type === 'mushroom') {
+      const stem = new THREE.Mesh(new THREE.CylinderGeometry(0.015, 0.03, 0.12, 8), stemMat);
+      stem.position.y = 0.06;
+      group.add(stem);
+
+      const cap = new THREE.Mesh(new THREE.SphereGeometry(0.07, 12, 12, 0, Math.PI * 2, 0, Math.PI / 2), petalMat);
+      cap.position.y = 0.11;
+      cap.scale.set(1, 0.7, 1);
+      group.add(cap);
+    } else if (info.type === 'star') {
+      const stem = new THREE.Mesh(new THREE.CylinderGeometry(0.01, 0.01, 0.14, 8), stemMat);
+      stem.position.y = 0.07;
+      group.add(stem);
+
+      const center = new THREE.Mesh(new THREE.SphereGeometry(0.025, 8, 8), innerMat);
+      center.position.y = 0.14;
+      group.add(center);
+
+      const petalGeo = new THREE.BoxGeometry(0.07, 0.005, 0.018);
+      for (let k = 0; k < 5; k++) {
+        const petal = new THREE.Mesh(petalGeo, petalMat);
+        petal.position.set(0, 0.14, 0);
+        petal.rotation.y = (k / 5) * Math.PI * 2;
+        petal.translateOnAxis(new THREE.Vector3(1, 0, 0), 0.035);
+        group.add(petal);
+      }
+    } else if (info.type === 'mana') {
+      const stem = new THREE.Mesh(new THREE.CylinderGeometry(0.01, 0.01, 0.12, 8), stemMat);
+      stem.position.y = 0.06;
+      group.add(stem);
+
+      const petalGeo = new THREE.SphereGeometry(0.03, 8, 8);
+      petalGeo.scale(1, 1.2, 0.5);
+      for (let k = 0; k < 3; k++) {
+        const petal = new THREE.Mesh(petalGeo, petalMat);
+        petal.position.set(0, 0.12, 0);
+        petal.rotation.y = (k / 3) * Math.PI * 2;
+        petal.rotation.x = 0.3;
+        petal.translateOnAxis(new THREE.Vector3(0, 0, 1), 0.025);
+        group.add(petal);
+      }
+    } else {
+      const leafCount = 4;
+      const leafGeo = new THREE.CylinderGeometry(0.003, 0.014, 0.15, 5);
+      leafGeo.translate(0, 0.07, 0);
+      
+      for (let k = 0; k < leafCount; k++) {
+        const leaf = new THREE.Mesh(leafGeo, petalMat);
+        leaf.position.set(0, 0.02, 0);
+        leaf.rotation.z = 0.6;
+        leaf.rotation.y = (k / leafCount) * Math.PI * 2;
+        group.add(leaf);
+      }
+    }
+  }
+
+  /**
+   * Crea paneles de interfaz mística ajustados al nivel del piso del usuario.
+   */
+  createSpatialUI() {
+    // --- PANEL IZQUIERDO: Inventario y Control ---
+    this.uiPanel = new xb.SpatialPanel({
+      width: 0.75,
+      height: 0.65,
+      backgroundColor: '#0d1c0ecc', 
+    });
+    // Ajustar posición más baja enfrente del piso elevado
+    this.uiPanel.position.set(-0.45, this.floorY + 0.35, -0.75);
+    this.uiPanel.rotation.y = 0.4;
+    this.add(this.uiPanel);
+
+    const leftGrid = this.uiPanel.addGrid();
+
+    leftGrid.addRow({ weight: 0.25 }).addText({
+      text: 'Explorador VR Alquimista',
+      fontSize: 0.048,
+      fontColor: '#a7f3d0'
+    });
+
+    this.uiScoreText = leftGrid.addRow({ weight: 0.2 }).addText({
+      text: `Muestras: 0 / ${this.totalPlants}`,
+      fontSize: 0.052,
+      fontColor: '#ffffff'
+    });
+
+    this.uiSubtitle = leftGrid.addRow({ weight: 0.25 }).addText({
+      text: '¡Agarra las plantas del suelo o la caja de cartón con tus manos y examínalas rotando tu muñeca!',
+      fontSize: 0.024,
+      fontColor: '#94a3b8'
+    });
+
+    const resetRow = leftGrid.addRow({ weight: 0.3 });
+    resetRow.addCol({ weight: 0.1 });
+    this.uiResetBtn = resetRow.addCol({ weight: 0.8 }).addTextButton({
+      text: 'Reiniciar Bosque',
+      fontColor: '#051407',
+      backgroundColor: '#10b981',
+      fontSize: 0.12,
+    });
+    resetRow.addCol({ weight: 0.1 });
+
+    this.uiResetBtn.onTriggered = () => {
+      this.resetExperience();
+    };
+
+    this.uiPanel.updateLayouts();
+
+
+    // --- PANEL DERECHO: El Altar de Alquimia de Gemini ---
+    this.alchemyPanel = new xb.SpatialPanel({
+      width: 0.9,
+      height: 0.65,
+      backgroundColor: '#15141acc', 
+    });
+    this.alchemyPanel.position.set(0.45, this.floorY + 0.35, -0.75);
+    this.alchemyPanel.rotation.y = -0.4;
+    this.add(this.alchemyPanel);
+
+    const rightGrid = this.alchemyPanel.addGrid();
+
+    rightGrid.addRow({ weight: 0.2 }).addText({
+      text: 'Altar Alquímico de Gemini',
+      fontSize: 0.046,
+      fontColor: '#c084fc'
+    });
+
+    this.alchemyIngredientsText = rightGrid.addRow({ weight: 0.15 }).addText({
+      text: 'En la Bolsa: Ninguno',
+      fontSize: 0.035,
+      fontColor: '#e9d5ff'
+    });
+
+    this.alchemyResultText = rightGrid.addRow({ weight: 0.45 }).addText({
+      text: 'Examina objetos con tus manos o arrástralos hacia la bolsa/caldero. Luego presiona el botón para consultar con el Espíritu de Gemini.',
+      fontSize: 0.026,
+      fontColor: '#94a3b8'
+    });
+
+    const actionRow = rightGrid.addRow({ weight: 0.2 });
+    actionRow.addCol({ weight: 0.15 });
+    this.alchemyBtn = actionRow.addCol({ weight: 0.7 }).addTextButton({
+      text: '✨ Destilar Poción',
+      fontColor: '#ffffff',
+      backgroundColor: '#8b5cf6',
+      fontSize: 0.12,
+    });
+    actionRow.addCol({ weight: 0.15 });
+
+    this.alchemyBtn.onTriggered = async () => {
+      await this.runAlchemicalBrewing();
+    };
+
+    this.alchemyPanel.updateLayouts();
+  }
+
+  /**
+   * Determina cuál mano física/controlador de Three está llamando el evento.
+   */
+  detectHand(controller) {
+    const p = new THREE.Vector3();
+    controller.getWorldPosition(p);
+    return p.x < 0 ? 'left' : 'right';
+  }
+
+  /**
+   * Agarrar planta con la mano o control. 
+   * Traslado dinámico al árbol de nodos del controlador para rotaciones perfectas en la muñeca.
+   */
+  onSelectStart(event) {
+    const controller = event.target;
+    
+    for (const plant of this.plants) {
+      if (plant.collected || plant.isBeingHeld) continue;
+
+      const intersection = xb.core.user.select(plant.triggerMesh, controller);
+      if (intersection) {
+        const hand = this.detectHand(controller);
+        
+        plant.isBeingHeld = true;
+        plant.holdingHand = hand;
+        plant.controllerRef = controller;
+
+        // Ocultar temporalmente el puntero láser de selección para inmersión limpia de mano
+        if (controller.children[0]) controller.children[0].visible = false;
+
+        // ACOPLAMIENTO DE NODO: Hacer al objeto hijo del controlador para que se mueva y rote exactamente con él
+        controller.add(plant.group);
+        
+        // Ajustar posición local del objeto frente al controlador para que se vea perfectamente en la mano
+        plant.group.position.set(0, 0, -0.08);
+        plant.group.rotation.set(0, 0, 0);
+
+        // Cancelar escala autónoma de animación
+        plant.visuals.position.y = 0;
+        break; 
+      }
+    }
+  }
+
+  /**
+   * Soltar el objeto místico y evaluar dónde cae físicamente en el claro de VR.
+   */
+  onSelectEnd(event) {
+    const controller = event.target;
+
+    for (const plant of this.plants) {
+      if (plant.isBeingHeld && plant.controllerRef === controller) {
+        plant.isBeingHeld = false;
+        plant.holdingHand = null;
+        plant.controllerRef = null;
+
+        if (controller.children[0]) controller.children[0].visible = true;
+
+        // Obtener posición del mundo real del objeto antes de desacoplarlo
+        const currentPos = new THREE.Vector3();
+        plant.group.getWorldPosition(currentPos);
+
+        // DESACOPLAR: Devolver el objeto a la escena principal para calcular colisiones físicas estáticas
+        this.add(plant.group);
+        plant.group.position.copy(currentPos);
+        plant.group.rotation.set(0, 0, 0);
+
+        const distToBag = currentPos.distanceTo(this.bagPos);
+        const distToCauldron = currentPos.distanceTo(this.cauldronPos);
+
+        if (distToBag < 0.28) {
+          this.depositInBag(plant, currentPos);
+        } else if (distToCauldron < 0.28) {
+          this.depositInCauldron(plant, currentPos);
+        } else {
+          // Si es liberado en otra zona del bosque, vuelve flotando majestuosamente a su lugar original
+          this.returnPlantToSpawn(plant, currentPos);
+        }
+        break;
+      }
+    }
+  }
+
+  /**
+   * Guarda el objeto en la Bolsa de Muestras.
+   */
+  depositInBag(plant, currentPos) {
+    plant.collected = true;
+    plant.triggerMesh.visible = false;
+    this.baggedCount++;
+    this.baggedIngredients.push(plant.type.name);
+
+    this.activeAnimations.push({
+      type: 'absorb_bag',
+      plant: plant,
+      startPos: currentPos.clone(),
+      endPos: this.bagPos.clone().add(new THREE.Vector3(0, 0.08, 0)),
+      startTime: this.time,
+      duration: 0.45
+    });
+
+    this.uiScoreText.setText(`Muestras: ${this.baggedCount} / ${this.totalPlants}`);
+    this.alchemyIngredientsText.setText(`En la Bolsa: ${this.baggedIngredients.join(', ')}`);
+    
+    if (this.baggedCount === this.totalPlants) {
+      this.uiSubtitle.setText('¡Colección botánica y mística completada!');
+    } else {
+      this.uiSubtitle.setText(`Bolsa: ¡Has guardado ${plant.type.name}!`);
+    }
+
+    this.spawnSparks(this.bagPos.clone().add(new THREE.Vector3(0, 0.12, 0)), 0xe9d5ff);
+  }
+
+  /**
+   * Deposita el objeto directamente en el Caldero.
+   */
+  depositInCauldron(plant, currentPos) {
+    plant.collected = true;
+    plant.triggerMesh.visible = false;
+    this.cauldronIngredients.push(plant.type.name);
+
+    this.activeAnimations.push({
+      type: 'absorb_cauldron',
+      plant: plant,
+      startPos: currentPos.clone(),
+      endPos: this.cauldronPos.clone().add(new THREE.Vector3(0, 0.18, 0)),
+      startTime: this.time,
+      duration: 0.45
+    });
+
+    this.targetLiquidColor.setHex(plant.type.color);
+    this.spawnSparks(this.cauldronPos.clone().add(new THREE.Vector3(0, 0.18, 0)), plant.type.color);
+    
+    this.uiSubtitle.setText(`Alquimia: ¡Vertido ${plant.type.name} en el caldero!`);
+  }
+
+  /**
+   * Retorna flotando a su posición original en el suelo.
+   */
+  returnPlantToSpawn(plant, currentPos) {
+    this.activeAnimations.push({
+      type: 'return_spawn',
+      plant: plant,
+      startPos: currentPos.clone(),
+      endPos: plant.spawnPosition.clone(),
+      startTime: this.time,
+      duration: 0.7
+    });
+  }
+
+  /**
+   * Genera chispas místicas flotantes.
+   */
+  spawnSparks(pos, colorHex) {
+    const particleCount = 12;
+    const pGeo = new THREE.SphereGeometry(0.012, 4, 4);
+    const pMat = new THREE.MeshBasicMaterial({ color: colorHex });
+
+    for (let i = 0; i < particleCount; i++) {
+      const spark = new THREE.Mesh(pGeo, pMat);
+      spark.position.copy(pos);
+      this.add(spark);
+
+      const theta = Math.random() * Math.PI * 2;
+      const phi = Math.acos((Math.random() * 2) - 1);
+      const velocity = new THREE.Vector3(
+        Math.sin(phi) * Math.cos(theta) * (0.4 + Math.random() * 0.5),
+        (0.6 + Math.random() * 0.8), 
+        Math.sin(phi) * Math.sin(theta) * (0.4 + Math.random() * 0.5)
+      );
+
+      this.particles.push({
+        mesh: spark,
+        velocity: velocity,
+        life: 1.0, 
+        decay: 1.4 + Math.random() * 1.5
+      });
+    }
+  }
+
+  /**
+   * Llama a Gemini para formular la poción mística.
+   */
+  async runAlchemicalBrewing() {
+    this.alchemyResultText.setText('✨ El Espíritu de Gemini está sintiendo la vibración física de los ingredientes...');
+    this.alchemyBtn.setFontColor('#94a3b8');
+    this.alchemyBtn.setBackgroundColor('#4c1d95');
+
+    let prompt = "";
+    if (this.baggedIngredients.length === 0 && this.cauldronIngredients.length === 0) {
+      prompt = "No tengo nada en la bolsa ni en el caldero todavía. Háblame de los misterios cósmicos de este bosque nocturno estrellado y lánzame un corto acertijo.";
+    } else {
+      const bolsaTexto = this.baggedIngredients.length > 0 ? this.baggedIngredients.join(', ') : 'Ninguno';
+      const calderoTexto = this.cauldronIngredients.length > 0 ? this.cauldronIngredients.join(', ') : 'Ninguno';
+      
+      prompt = `El explorador ha recolectado en su bolsa: ${bolsaTexto}, y ha depositado en su caldero físico de alquimia: ${calderoTexto}. Si contiene la "Caja de Cartón" (basada en una caja de embalaje con cinta), describe cómo el misterio y el empaque rústico de la caja de cartón añade propiedades protectoras de sorpresa al elixir. Formula una poción poética.`;
+    }
+
+    const respuestaMistica = await consultarEspirituGemini(prompt);
+    this.alchemyResultText.setText(respuestaMistica);
+
+    this.alchemyBtn.setFontColor('#ffffff');
+    this.alchemyBtn.setBackgroundColor('#8b5cf6');
+  }
+
+  /**
+   * Reinicia la experiencia completa de realidad virtual.
+   */
+  resetExperience() {
+    this.spawnPlants();
+
+    this.uiScoreText.setText(`Muestras: 0 / ${this.totalPlants}`);
+    this.uiSubtitle.setText('¡Toma las plantas o la caja del suelo con tus manos y examínalas rotando tu muñeca!');
+    
+    this.alchemyIngredientsText.setText('En la Bolsa: Ninguno');
+    this.alchemyResultText.setText('Examina objetos con tus manos o arrástralos hacia la bolsa/caldero. Luego presiona el botón para consultar con el Espíritu de Gemini.');
+    this.targetLiquidColor.setHex(0x22c55e);
+  }
+
+  /**
+   * Bucle lógico de renderizado fotograma a fotograma.
+   */
+  update() {
+    const dt = xb.getDeltaTime();
+    this.time += dt;
+
+    // 1. Animación del viento en las copas de los árboles de fantasía
+    this.treesToAnimate.forEach(t => {
+      const angleX = Math.sin(this.time * t.speed + t.offset) * 0.025;
+      const angleZ = Math.cos(this.time * t.speed * 0.85 + t.offset) * 0.025;
+      t.group.rotation.set(angleX, 0, angleZ);
+    });
+
+    // 2. Visibilidad inteligente de las manos según el estado de la sesión XR
+    const xr = (xb.core.renderer && xb.core.renderer.xr) ? xb.core.renderer.xr : null;
+    ['left', 'right'].forEach(handName => {
+      const visual = this.handVisuals[handName];
+      if (visual && xr) {
+        // En VR inmersivo se muestran las manos siempre. En el simulador se muestran al usar las interacciones.
+        visual.visible = xr.isPresenting || true;
+      }
+    });
+
+    // 3. Animación autónoma de flotación en las flores (Evitando rotación en la CAJA DE CARTÓN)
+    this.plants.forEach(p => {
+      if (!p.collected && !p.isBeingHeld) {
+        if (p.type.type !== 'carton_box') {
+          // La flora mágica flota y gira
+          p.visuals.position.y = Math.sin(this.time * p.bobSpeed + p.bobOffset) * 0.015 + 0.012;
+          p.visuals.rotation.y += p.spinSpeed * dt;
+          p.light.intensity = 0.6 + Math.sin(this.time * 2.2 + p.bobOffset) * 0.2;
+        } else {
+          // La caja de cartón rústica de tu imagen permanece sólida y quieta en el suelo
+          p.visuals.position.y = 0;
+          p.visuals.rotation.set(0, 0, 0);
+          p.light.intensity = 0.5;
+        }
+      }
+    });
+
+    // 4. Suavizado en la transición de color del líquido del caldero
+    if (!this.currentLiquidColor.equals(this.targetLiquidColor)) {
+      this.currentLiquidColor.lerp(this.targetLiquidColor, 0.05);
+      this.liquidMat.color.copy(this.currentLiquidColor);
+      this.liquidMat.emissive.copy(this.currentLiquidColor).multiplyScalar(0.4);
+      this.cauldronLight.color.copy(this.currentLiquidColor);
+    }
+
+    // 5. Procesamiento de las animaciones activas (Regreso, Absorciones de bolsas y caldero)
+    for (let i = this.activeAnimations.length - 1; i >= 0; i--) {
+      const anim = this.activeAnimations[i];
+      const elapsed = this.time - anim.startTime;
+      const progress = Math.min(elapsed / anim.duration, 1.0);
+
+      const t = progress * progress;
+
+      const currentPos = new THREE.Vector3().lerpVectors(anim.startPos, anim.endPos, t);
+      anim.plant.group.position.copy(currentPos);
+
+      // Al regresar al spawn, restaurar suavemente su rotación base
+      if (anim.type === 'return_spawn') {
+        const targetQuat = new THREE.Quaternion(); // Rotación neutral orientada hacia el horizonte
+        anim.plant.group.quaternion.slerp(targetQuat, 0.08);
+      }
+
+      if (anim.type.startsWith('absorb')) {
+        const s = 1.0 - t;
+        anim.plant.visuals.scale.setScalar(s);
+        anim.plant.light.intensity = s;
+      }
+
+      if (progress >= 1.0) {
+        if (anim.type.startsWith('absorb')) {
+          anim.plant.group.visible = false;
+        }
+        this.activeAnimations.splice(i, 1);
+      }
+    }
+
+    // 6. Motor de partículas físicas místicas
+    for (let i = this.particles.length - 1; i >= 0; i--) {
+      const p = this.particles[i];
+      p.life -= dt * p.decay;
+
+      if (p.life <= 0) {
+        this.remove(p.mesh);
+        p.mesh.geometry.dispose();
+        p.mesh.material.dispose();
+        this.particles.splice(i, 1);
+      } else {
+        p.mesh.position.addScaledVector(p.velocity, dt);
+        p.velocity.y -= 2.0 * dt; // Gravedad del bosque
+        p.mesh.scale.setScalar(p.life);
+      }
+    }
+  }
+}
+
+// Inicialización de la aplicación WebXR
+document.addEventListener('DOMContentLoaded', function () {
+  const options = new xb.Options();
+  options.enableUI();
+  options.enableHands(); // Clave para activar manos y grips físicos en XR
+  options.setAppTitle('Forest Alchemist VR');
+
+  xb.add(new ForestScriptVR());
+  xb.init(options);
+});
+</script>
+  </body>
+</html>
